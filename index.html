@@ -439,14 +439,41 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
     return expenses.filter(e=>inRange(e.date, start, end)).sort((a,b)=>b.date.localeCompare(a.date));
   }
 
+  function interestIncomeInRange(start, end){
+    // Interest portion of client repayments received in range (principal recovery excluded — balance sheet, not P&L).
+    let total = 0;
+    loans.forEach(l=>{
+      const rate = l.totalPayable>0 ? (l.totalPayable-l.principal)/l.totalPayable : 0;
+      l.installments.forEach(inst=>{
+        if(inst.paidAmount>0 && inst.paidDate && inRange(inst.paidDate, start, end)){
+          total += inst.paidAmount * rate;
+        }
+      });
+    });
+    return Math.round(total*100)/100;
+  }
+
+  function interestExpenseInRange(start, end){
+    // Interest portion of repayments made to lenders in range (principal repayment excluded — balance sheet, not P&L).
+    let total = 0;
+    borrowings.forEach(b=>{
+      const rate = b.totalPayable>0 ? (b.totalPayable-b.principal)/b.totalPayable : 0;
+      b.installments.forEach(inst=>{
+        if(inst.paidAmount>0 && inst.paidDate && inRange(inst.paidDate, start, end)){
+          total += inst.paidAmount * rate;
+        }
+      });
+    });
+    return Math.round(total*100)/100;
+  }
+
   function profitAndLoss(start, end){
-    const revenue = Object.values(cashReceivedByDate(start,end)).reduce((s,v)=>s+v,0);
-    const principalDisbursed = Object.values(cashDisbursedByDate(start,end)).reduce((s,v)=>s+v,0);
+    const interestIncome = interestIncomeInRange(start, end);
+    const interestExpense = interestExpenseInRange(start, end);
+    const netInterestIncome = interestIncome - interestExpense;
     const expenseTotal = expensesInRange(start,end).reduce((s,e)=>s+e.amount,0);
-    const paidToLenders = Object.values(lenderPaymentsByDate(start,end)).reduce((s,v)=>s+v,0);
-    const totalCosts = principalDisbursed + expenseTotal + paidToLenders;
-    const profit = revenue - totalCosts;
-    return {revenue, principalDisbursed, expenseTotal, paidToLenders, totalCosts, profit};
+    const netProfit = netInterestIncome - expenseTotal;
+    return {interestIncome, interestExpense, netInterestIncome, expenseTotal, netProfit};
   }
 
   // ---------- RENDER ----------
@@ -592,21 +619,23 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
       <div class="topline"><h1>Accounts</h1><span class="today mono">${dfmt(todayStr())}</span></div>
 
       <div class="panel">
-        <div class="panel-head"><h3>Profit &amp; loss</h3></div>
+        <div class="panel-head"><h3>Income statement</h3></div>
         <div class="panel-body">
           <div class="row2" style="margin-bottom:14px">
             <div><label>From</label><input type="date" id="mlt-acc-start" value="${accountsRange.start}"/></div>
             <div><label>To</label><input type="date" id="mlt-acc-end" value="${accountsRange.end}"/></div>
           </div>
           <button class="btn btn-primary btn-sm" id="mlt-acc-apply" style="margin-bottom:18px">Apply range</button>
-          <div class="cards">
-            <div class="card good"><div class="label">Revenue</div><div class="value">${fmt(pl.revenue)}</div></div>
-            <div class="card"><div class="label">Cost of sales</div><div class="value">${fmt(pl.principalDisbursed)}</div></div>
-            <div class="card"><div class="label">Expenses</div><div class="value">${fmt(pl.expenseTotal)}</div></div>
-            <div class="card"><div class="label">Paid to lenders</div><div class="value">${fmt(pl.paidToLenders)}</div></div>
-            <div class="card ${pl.profit>=0?'good':'warn'}"><div class="label">Profit</div><div class="value">${fmt(pl.profit)}</div></div>
-          </div>
-          <div class="hint" style="margin-top:6px">Revenue = all client repayments (principal + interest) received in this period. Cost of sales = principal you lent out (no interest). Profit = Revenue − Cost of sales − Expenses − Paid to lenders.</div>
+          <table>
+            <tbody>
+              <tr><td>Interest income (from clients)</td><td class="num mono" style="color:var(--green)">${fmt(pl.interestIncome)}</td></tr>
+              <tr><td>Interest expense (paid to lenders)</td><td class="num mono" style="color:var(--red)">(${fmt(pl.interestExpense)})</td></tr>
+              <tr style="border-top:1.5px solid var(--rule)"><td><b>Net interest income</b></td><td class="num mono"><b>${fmt(pl.netInterestIncome)}</b></td></tr>
+              <tr><td>Operating expenses</td><td class="num mono" style="color:var(--red)">(${fmt(pl.expenseTotal)})</td></tr>
+              <tr style="border-top:1.5px solid var(--rule)"><td style="font-size:15px"><b>Net profit</b></td><td class="num mono" style="font-size:15px;color:${pl.netProfit>=0?'var(--green)':'var(--red)'}"><b>${fmt(pl.netProfit)}</b></td></tr>
+            </tbody>
+          </table>
+          <div class="hint" style="margin-top:10px">Only interest is treated as income/expense here — principal lent, borrowed, or repaid moves cash but isn't profit or loss on its own, so it's left out of this statement.</div>
         </div>
       </div>
 
