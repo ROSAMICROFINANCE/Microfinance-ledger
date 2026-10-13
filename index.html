@@ -412,6 +412,26 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
     }).filter(r=>r.loanCount>0).sort((a,b)=>b.principal-a.principal);
   }
 
+  function pendingByClientRows(){
+    // Every client with at least one loan still carrying a balance, with each of their
+    // open loans listed underneath and a per-client subtotal — e.g. all of Frank Muuya's
+    // pending loans grouped together with his total owed.
+    return clients.map(c=>{
+      const clientLoans = loans
+        .filter(l=>l.clientId===c.id)
+        .map(l=>({loan:l, t:loanTotals(l)}))
+        .filter(r=>r.t.outstanding>0.005)
+        .sort((a,b)=>a.loan.dueDate.localeCompare(b.loan.dueDate));
+      const total = clientLoans.reduce((s,r)=>s+r.t.outstanding,0);
+      return {client:c, loans:clientLoans, total};
+    }).filter(r=>r.loans.length>0).sort((a,b)=>b.total-a.total);
+  }
+
+  function cashBookOpeningBalance(beforeDate){
+    const rows = cashBookTransactions('2000-01-01', addDays(beforeDate, -1));
+    return rows.reduce((bal,r)=> bal + (r.type==='debit' ? r.amount : -r.amount), 0);
+  }
+
   function borrowingTotals(b){
     const paid = b.installments.reduce((s,i)=>s+(i.paidAmount||0),0);
     const outstanding = Math.max(0, b.totalPayable - paid);
@@ -587,12 +607,14 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
           <button class="btn btn-ghost" id="mlt-open-cashbook">Cash book</button>
           <button class="btn btn-ghost" id="mlt-open-interest">Interest gained</button>
           <button class="btn btn-ghost" id="mlt-open-principal">Principal by client</button>
+          <button class="btn btn-ghost" id="mlt-open-pending">Pending loans by client</button>
         </div>
       </div>
     `;
     document.getElementById('mlt-open-cashbook').addEventListener('click', openCashBookModal);
     document.getElementById('mlt-open-interest').addEventListener('click', openInterestModal);
     document.getElementById('mlt-open-principal').addEventListener('click', openPrincipalModal);
+    document.getElementById('mlt-open-pending').addEventListener('click', openPendingByClientModal);
     mainEl.querySelectorAll('[data-open-loan]').forEach(el=>{
       el.addEventListener('click', (e)=>{
         if(e.target.closest('[data-pay-report]')) return;
@@ -1097,12 +1119,12 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
     const wrap = document.createElement('div');
     wrap.id = 'mlt-modal-backdrop'; wrap.className = 'modal-backdrop';
     wrap.innerHTML = `
-      <div class="modal" style="max-width:640px">
+      <div class="modal" style="max-width:680px">
         <div class="modal-head"><h3>Cash book</h3><button class="x-close" id="mlt-modal-x">&times;</button></div>
         <div class="modal-body">
           ${dateRangeControls(start, end)}
-          <div class="hint" style="margin-bottom:10px">Debit = cash received from clients. Credit = cash paid out as new loans.</div>
-          <div id="mlt-rr-body"></div>
+          <div class="hint" style="margin-bottom:10px">Debit = cash received from clients. Credit = cash paid out as new loans. Balance carries forward from before the chosen range.</div>
+          <div id="mlt-rr-body" style="overflow-x:auto"></div>
         </div>
         <div class="modal-foot"><button class="btn btn-ghost" id="mlt-modal-cancel">Close</button></div>
       </div>`;
@@ -1113,23 +1135,78 @@ html,body{margin:0;padding:0;background:#F6F3EC;}
       const s = document.getElementById('mlt-rr-start').value;
       const e = document.getElementById('mlt-rr-end').value;
       const rows = cashBookTransactions(s, e);
+      const opening = cashBookOpeningBalance(s);
       const totalDebit = rows.filter(r=>r.type==='debit').reduce((a,r)=>a+r.amount,0);
       const totalCredit = rows.filter(r=>r.type==='credit').reduce((a,r)=>a+r.amount,0);
-      document.getElementById('mlt-rr-body').innerHTML = rows.length===0 ? `<div class="empty">No cash movement in this range.</div>` : `
-        <table><thead><tr><th>Date</th><th>Details</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead><tbody>
-        ${rows.map(r=>`<tr>
+      const closing = opening + totalDebit - totalCredit;
+      let running = opening;
+      const bodyRows = rows.map(r=>{
+        running += (r.type==='debit' ? r.amount : -r.amount);
+        return `<tr>
           <td class="mono">${dfmt(r.date)}</td>
           <td>${escapeHtml(r.name)} <span class="hint" style="display:inline">— ${r.note}</span></td>
           <td class="num mono" style="color:var(--green)">${r.type==='debit' ? fmt(r.amount) : ''}</td>
           <td class="num mono" style="color:var(--red)">${r.type==='credit' ? fmt(r.amount) : ''}</td>
-        </tr>`).join('')}
+          <td class="num mono" style="font-weight:600">${fmt(running)}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('mlt-rr-body').innerHTML = `
+        <table><thead><tr><th>Date</th><th>Details</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance</th></tr></thead><tbody>
+        <tr style="background:var(--amber-bg)">
+          <td class="mono">${dfmt(s)}</td>
+          <td><i>Opening balance</i></td>
+          <td></td><td></td>
+          <td class="num mono" style="font-weight:600">${fmt(opening)}</td>
+        </tr>
+        ${bodyRows || `<tr><td colspan="5" style="text-align:center;color:var(--hint,#888);padding:14px">No cash movement in this range.</td></tr>`}
         </tbody></table>
         <div style="text-align:right;margin-top:10px;padding-top:10px;border-top:1px solid var(--rule)">
-          <span class="mono">Debit total: <b style="color:var(--green)">${fmt(totalDebit)}</b> &nbsp; Credit total: <b style="color:var(--red)">${fmt(totalCredit)}</b> &nbsp; Net: <b>${fmt(totalDebit-totalCredit)}</b></span>
+          <span class="mono">Debit total: <b style="color:var(--green)">${fmt(totalDebit)}</b> &nbsp; Credit total: <b style="color:var(--red)">${fmt(totalCredit)}</b> &nbsp; Closing balance: <b>${fmt(closing)}</b></span>
         </div>`;
     }
     document.getElementById('mlt-rr-apply').addEventListener('click', renderBody);
     renderBody();
+  }
+
+  function openPendingByClientModal(){
+    const groups = pendingByClientRows();
+    const grandTotal = groups.reduce((s,g)=>s+g.total,0);
+    const wrap = document.createElement('div');
+    wrap.id = 'mlt-modal-backdrop'; wrap.className = 'modal-backdrop';
+    wrap.innerHTML = `
+      <div class="modal" style="max-width:640px">
+        <div class="modal-head"><h3>Pending loans by client</h3><button class="x-close" id="mlt-modal-x">&times;</button></div>
+        <div class="modal-body">
+          ${groups.length===0 ? `<div class="empty">No pending balances — everything is paid up.</div>` : groups.map(g=>`
+            <div style="margin-bottom:20px">
+              <div style="font-weight:600;margin-bottom:6px">${escapeHtml(g.client.name)}</div>
+              <table><thead><tr><th>Loan start</th><th>Due</th><th class="num">Outstanding</th><th></th></tr></thead><tbody>
+              ${g.loans.map(r=>`<tr class="clickable" data-open-loan="${r.loan.id}">
+                <td class="mono">${dfmt(r.loan.startDate)}</td>
+                <td class="mono">${dfmt(r.loan.dueDate)}</td>
+                <td class="num mono">${fmt(r.t.outstanding)}</td>
+                <td>${r.t.status==='overdue' ? '<span style="color:var(--red)">Overdue</span>' : ''}</td>
+              </tr>`).join('')}
+              </tbody></table>
+              <div style="text-align:right;margin-top:4px">
+                <span class="mono">Subtotal for ${escapeHtml(g.client.name)}: <b>${fmt(g.total)}</b></span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="modal-foot">
+          ${groups.length>0 ? `<span class="mono" style="margin-right:auto;font-weight:600">Grand total pending: ${fmt(grandTotal)}</span>` : ''}
+          <button class="btn btn-ghost" id="mlt-modal-cancel">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    document.getElementById('mlt-modal-x').addEventListener('click', closeModal);
+    document.getElementById('mlt-modal-cancel').addEventListener('click', closeModal);
+    wrap.querySelectorAll('[data-open-loan]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        detailLoanId = el.dataset.openLoan; view='loanDetail'; closeModal(); render();
+      });
+    });
   }
 
   function openInterestModal(){
