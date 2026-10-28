@@ -204,6 +204,7 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4.4.1/dist/email.min.js"></script>
 <script>
 (function(){
   const root = document.getElementById('mlt-root');
@@ -216,6 +217,7 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
   let detailLoanId = null;
   let detailBorrowingId = null;
   let loaded = false;
+  let loadFailed = false;
 
   const fmt = n => '$' + (Math.round((n||0)*100)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const pad2 = n => String(n).padStart(2,'0');
@@ -255,12 +257,15 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
       } else {
         clients = []; loans = []; expenses = []; borrowings = [];
       }
+      loaded = true;
+      loadFailed = false;
     }catch(e){
       clients = []; loans = []; expenses = []; borrowings = [];
+      loaded = false;
+      loadFailed = true;
       if(String(e.message).includes('timeout')) toast('Loading timed out — your connection may be too slow or unstable right now');
       else toast('Could not load your data — check your internet connection');
     }
-    loaded = true;
   }
   function loadSeedData(){
     const parsed = parseShorthandBlock(SEED_TEXT, SEED_START_DATE);
@@ -277,11 +282,13 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
   }
   let lastSyncLog = { status: 'none', message: 'No save attempted yet', time: null, projectId: '' };
   async function saveToCloud(){
+    if(!loaded){ toast('Not saved: your data has not loaded yet. Tap Try again.'); return; }
     const startTime = new Date().toISOString();
     try{
       await withTimeout(window.__fb.setDoc(userDocRef(), {clients, loans, expenses, borrowings, updatedAt: new Date().toISOString()}), 20000, 'save');
       lastSyncLog = { status: 'success', message: 'Saved successfully', time: startTime, projectId: window.__fb.auth.app.options.projectId, uid: window.__fb.auth.currentUser.uid };
       toast('Saved');
+      scheduleEmailBackup();
     }catch(e){
       const errMsg = (e && e.message) ? e.message : String(e);
       lastSyncLog = { status: 'error', message: errMsg, time: startTime, projectId: window.__fb.auth.app.options.projectId, uid: window.__fb.auth.currentUser ? window.__fb.auth.currentUser.uid : 'none' };
@@ -498,7 +505,19 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
 
   // ---------- RENDER ----------
   function render(){
-    if(!loaded){ mainEl.innerHTML = '<div class="empty">Loading your ledger…</div>'; return; }
+    if(!loaded){
+      if(loadFailed){
+        mainEl.innerHTML = '<div class="empty">Your data could not be loaded. Nothing has been changed or saved.<br><br><button class="btn btn-primary btn-sm" id="mlt-retry-load">Try again</button></div>';
+        document.getElementById('mlt-retry-load').addEventListener('click', async ()=>{
+          mainEl.innerHTML = '<div class="empty">Loading your ledger…</div>';
+          await loadAll();
+          render();
+        });
+      } else {
+        mainEl.innerHTML = '<div class="empty">Loading your ledger…</div>';
+      }
+      return;
+    }
     root.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active', b.dataset.nav===view));
     if(view==='dashboard') renderDashboard();
     else if(view==='clients') renderClients();
@@ -1515,13 +1534,14 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
 
 
   // ---------- BACKUP / RESTORE ----------
-  function exportBackup(){
-    const data = {app:'Rosa-Microfinance', exportedAt: new Date().toISOString(), clients, loans};
+  function exportBackup(label){
+    if(!loaded){ toast('Your data has not loaded yet. Backup not created.'); return; }
+    const data = {app:'Rosa-Microfinance', exportedAt: new Date().toISOString(), clients, loans, expenses, borrowings};
     const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `ledger-backup-${todayStr()}.json`;
+    a.download = `ledger-backup-${todayStr()}${label ? '-' + label : ''}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1538,8 +1558,9 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
         <div class="modal-body">
           <div class="field">
             <label>Save a backup</label>
-            <div class="hint" style="margin-bottom:10px">Downloads a file with all your clients and loans. Save it to Google Drive, email it to yourself, or send it to your own WhatsApp — anywhere off this phone.</div>
+            <div class="hint" style="margin-bottom:10px">Downloads a file with all your clients, loans, expenses and borrowings. Save it to Google Drive, email it to yourself, or send it to your own WhatsApp — anywhere off this phone.</div>
             <button class="btn btn-primary btn-sm" id="mlt-do-export">Download backup</button>
+            <button class="btn btn-primary btn-sm" id="mlt-do-email" style="margin-left:8px">Email backup</button>
           </div>
           <div class="field" style="margin-top:22px;padding-top:18px;border-top:1px solid var(--rule)">
             <label>Restore from a backup</label>
@@ -1576,8 +1597,10 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
     renderDiag();
     document.getElementById('mlt-modal-x').addEventListener('click', closeModal);
     document.getElementById('mlt-modal-cancel').addEventListener('click', closeModal);
-    document.getElementById('mlt-do-export').addEventListener('click', exportBackup);
+    document.getElementById('mlt-do-export').addEventListener('click', ()=>exportBackup());
+    document.getElementById('mlt-do-email').addEventListener('click', ()=>emailBackup());
     document.getElementById('mlt-load-seed').addEventListener('click', ()=>{
+      if(!loaded){ toast('Your data has not loaded yet'); return; }
       if(clients.length>0){ if(!confirm('You already have clients saved. This will ADD the original 6 on top of what you have — could create duplicates. Continue?')) return; }
       else if(!confirm('Load the original 6 starting clients with zero payments recorded?')) return;
       loadSeedData(); closeModal(); toast('Starting data loaded'); view='dashboard'; render();
@@ -1585,14 +1608,18 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
     document.getElementById('mlt-restore-file').addEventListener('change', (e)=>{
       const file = e.target.files[0];
       if(!file) return;
+      if(!loaded){ toast('Your data has not loaded yet. Wait for it to load, then restore.'); e.target.value=''; return; }
       const reader = new FileReader();
       reader.onload = () => {
         let data;
         try{ data = JSON.parse(reader.result); }catch(err){ toast('That file is not a valid backup'); return; }
         if(!data || !Array.isArray(data.clients) || !Array.isArray(data.loans)){ toast('That file is not a valid backup'); return; }
-        if(!confirm(`Replace everything currently in the app with this backup (${data.clients.length} clients, ${data.loans.length} loans)? This cannot be undone.`)) return;
-        clients = data.clients; loans = data.loans;
-        saveClients(); saveLoans();
+        const newExpenses = Array.isArray(data.expenses) ? data.expenses : expenses;
+        const newBorrowings = Array.isArray(data.borrowings) ? data.borrowings : borrowings;
+        if(!confirm(`Replace everything currently in the app with this backup (${data.clients.length} clients, ${data.loans.length} loans, ${newExpenses.length} expenses, ${newBorrowings.length} borrowings)? A copy of your current data will be downloaded first. This cannot be undone.`)) return;
+        exportBackup('before-restore');
+        clients = data.clients; loans = data.loans; expenses = newExpenses; borrowings = newBorrowings;
+        saveToCloud();
         closeModal(); toast('Backup restored'); view='dashboard'; render();
       };
       reader.readAsText(file);
@@ -1647,9 +1674,76 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
       } else {
         root.style.display = 'none';
         loginScreen.style.display = 'flex';
-        clients = []; loans = []; loaded = false;
+        clients = []; loans = []; loaded = false; loadFailed = false;
       }
     });
+  }
+
+  // ---------- EMAIL BACKUP (EmailJS automatic + manual) ----------
+  const EMAILJS_PUBLIC_KEY  = 'Y4RtPHMztZjzHkPDO';
+  const EMAILJS_SERVICE_ID  = 'service_2fbu8rl';
+  const EMAILJS_TEMPLATE_ID = 'template_nucep54';
+  const BACKUP_EMAIL = 'roysystem14@gmail.com';
+  const EMAIL_LAST_SENT_KEY = 'ledger-last-email-backup-date';
+  let emailTimer = null;
+  let emailBusy = false;
+
+  function backupSummary(){
+    return `Backup date: ${new Date().toLocaleString()}\nClients: ${clients.length}\nLoans: ${loans.length}\nExpenses: ${expenses.length}\nBorrowings: ${borrowings.length}`;
+  }
+  function backupJson(){
+    return JSON.stringify({app:'Rosa-Microfinance', exportedAt: new Date().toISOString(), clients, loans, expenses, borrowings}, null, 2);
+  }
+
+  // Automatic email through EmailJS. Never sends data that has not loaded.
+  function sendEmailBackup(reason){
+    if(!loaded) return Promise.resolve(false);
+    if(!window.emailjs || emailBusy || !navigator.onLine) return Promise.resolve(false);
+    emailBusy = true;
+    const params = {
+      to_email: BACKUP_EMAIL,
+      subject: `Ledger backup - ${todayStr()} (${reason})`,
+      summary: backupSummary() + `\nReason: ${reason}`,
+      backup_json: backupJson()
+    };
+    return window.emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, params, {publicKey: EMAILJS_PUBLIC_KEY})
+      .then(()=>{ localStorage.setItem(EMAIL_LAST_SENT_KEY, todayStr()); return true; })
+      .catch(err=>{ console.error('Email backup failed', err); return false; })
+      .finally(()=>{ emailBusy = false; });
+  }
+  // After each successful save: wait 10 seconds for changes to settle, then email.
+  function scheduleEmailBackup(){
+    clearTimeout(emailTimer);
+    emailTimer = setTimeout(()=>sendEmailBackup('after save'), 10000);
+  }
+  // Once per day: email if today's backup has not gone out. Checked on load and every 5 minutes.
+  function dailyEmailCheck(){
+    if(loaded && localStorage.getItem(EMAIL_LAST_SENT_KEY) !== todayStr()) sendEmailBackup('daily');
+  }
+  setTimeout(dailyEmailCheck, 30000);
+  setInterval(dailyEmailCheck, 5 * 60 * 1000);
+
+  // Manual button: phone share sheet (attach file, choose Gmail) or Gmail on a computer.
+  async function emailBackup(){
+    if(!loaded){ toast('Your data has not loaded yet. Backup not sent.'); return; }
+    const subject = `Ledger backup - ${todayStr()}`;
+    const summary = backupSummary();
+    const file = new File([backupJson()], `ledger-backup-${todayStr()}.json`, {type:'application/json'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({files:[file], title: subject, text: summary + '\n\nSend to: ' + BACKUP_EMAIL});
+        localStorage.setItem(EMAIL_LAST_SENT_KEY, todayStr());
+        toast('Backup shared');
+      }catch(e){
+        if(e && e.name === 'AbortError') toast('Backup cancelled');
+        else toast('Could not share the backup. Use Download backup instead.');
+      }
+      return;
+    }
+    exportBackup('email');
+    const body = summary + '\n\nPlease attach the backup file that was just downloaded, then send.';
+    window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(BACKUP_EMAIL)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`, '_blank');
+    toast('Attach the downloaded file in Gmail, then send');
   }
 
   if(window.__fb){ initAuthUI(); }
