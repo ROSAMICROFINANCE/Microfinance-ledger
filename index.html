@@ -1692,13 +1692,23 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
     return `Backup date: ${new Date().toLocaleString()}\nClients: ${clients.length}\nLoans: ${loans.length}\nExpenses: ${expenses.length}\nBorrowings: ${borrowings.length}`;
   }
   function backupJson(){
-    return JSON.stringify({app:'Rosa-Microfinance', exportedAt: new Date().toISOString(), clients, loans, expenses, borrowings}, null, 2);
+    return JSON.stringify({app:'Rosa-Microfinance', exportedAt: new Date().toISOString(), clients, loans, expenses, borrowings});
+  }
+
+  // Shows the result of every automatic email, so failures are visible.
+  function emailStatus(msg){
+    try{ localStorage.setItem('ledger-email-status', new Date().toLocaleString() + ' - ' + msg); }catch(e){}
+    toast(msg);
   }
 
   // Automatic email through EmailJS. Never sends data that has not loaded.
   function sendEmailBackup(reason){
     if(!loaded) return Promise.resolve(false);
-    if(!window.emailjs || emailBusy || !navigator.onLine) return Promise.resolve(false);
+    if(emailBusy) return Promise.resolve(false);
+    if(!window.emailjs){ emailStatus('Email not sent: email library did not load on this phone'); return Promise.resolve(false); }
+    if(!navigator.onLine){ emailStatus('Email not sent: no internet connection'); return Promise.resolve(false); }
+    const sizeCheck = backupJson();
+    if(new Blob([sizeCheck]).size > 45000){ emailStatus('Email not sent: backup is too big for the free email plan. Use Download backup instead.'); return Promise.resolve(false); }
     emailBusy = true;
     const params = {
       to_email: BACKUP_EMAIL,
@@ -1707,14 +1717,14 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
       backup_json: backupJson()
     };
     return window.emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, params, {publicKey: EMAILJS_PUBLIC_KEY})
-      .then(()=>{ localStorage.setItem(EMAIL_LAST_SENT_KEY, todayStr()); return true; })
-      .catch(err=>{ console.error('Email backup failed', err); return false; })
+      .then(()=>{ localStorage.setItem(EMAIL_LAST_SENT_KEY, todayStr()); emailStatus('Backup emailed to ' + BACKUP_EMAIL); return true; })
+      .catch(err=>{ console.error('Email backup failed', err); emailStatus('Email failed: ' + ((err && (err.text || err.message)) || 'unknown error')); return false; })
       .finally(()=>{ emailBusy = false; });
   }
   // After each successful save: wait 10 seconds for changes to settle, then email.
   function scheduleEmailBackup(){
     clearTimeout(emailTimer);
-    emailTimer = setTimeout(()=>sendEmailBackup('after save'), 10000);
+    emailTimer = setTimeout(()=>sendEmailBackup('after save'), 1500);
   }
   // Once per day: email if today's backup has not gone out. Checked on load and every 5 minutes.
   function dailyEmailCheck(){
@@ -1735,8 +1745,12 @@ html,body{margin:0;padding:0;background:#F2F2F0;}
         localStorage.setItem(EMAIL_LAST_SENT_KEY, todayStr());
         toast('Backup shared');
       }catch(e){
-        if(e && e.name === 'AbortError') toast('Backup cancelled');
-        else toast('Could not share the backup. Use Download backup instead.');
+        if(e && e.name === 'AbortError'){ toast('Backup cancelled'); return; }
+        // Share failed on this phone: download the file and open Gmail instead
+        toast('Share failed (' + ((e && e.name) || 'error') + '): ' + ((e && e.message) || 'no details') + '. Downloading file instead.');
+        exportBackup('email');
+        const fallbackBody = backupSummary() + '\n\nPlease attach the backup file that was just downloaded, then send.';
+        window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(BACKUP_EMAIL)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`, '_blank');
       }
       return;
     }
